@@ -351,7 +351,7 @@ func NewMapFromExistingMapByFd(fd int) (*EbpfMap, error) {
 		return nil, err
 	}
 
-	return &EbpfMap{
+	m := &EbpfMap{
 		fd:         fd,
 		Name:       NullTerminatedStringToString(rawInfo.Name[:]),
 		Type:       MapType(rawInfo.Type),
@@ -359,7 +359,13 @@ func NewMapFromExistingMapByFd(fd int) (*EbpfMap, error) {
 		ValueSize:  int(rawInfo.ValueSize),
 		MaxEntries: int(rawInfo.MaxEntries),
 		Flags:      int(rawInfo.Flags),
-	}, nil
+	}
+
+	if err := m.setValueRealSize(); err != nil {
+		return nil, err
+	}
+
+	return m, nil
 }
 
 // NewMapFromExistingMapById creates eBPF map from BPF object ID.
@@ -385,6 +391,21 @@ func (m *EbpfMap) isPerCpu() bool {
 		m.Type == MapTypePerCPUHash ||
 		m.Type == MapTypeLRUPerCPUHash ||
 		m.Type == MapTypePerCpuCGroupStorage
+}
+
+// Per-CPU maps require extra space to store values from ALL possible CPUs.
+// For access from userspace, each single value is padded so that it's a multiple of 8 bytes.
+func (m *EbpfMap) setValueRealSize() error {
+	if m.isPerCpu() {
+		numCpus, err := GetNumOfPossibleCpus()
+		if err != nil {
+			return err
+		}
+		m.valueRealSize = ((m.ValueSize + 7) / 8) * 8 * numCpus
+	} else {
+		m.valueRealSize = m.ValueSize
+	}
+	return nil
 }
 
 // Map elements part: lookup, update / delete / etc
@@ -430,16 +451,8 @@ func (m *EbpfMap) Create() error {
 		return fmt.Errorf("Invalid map '%s' value size(%d)", m.Name, m.ValueSize)
 	}
 
-	// Per-CPU maps require extra space to store values from ALL possible CPUs
-	// For access from userspace, each value is padded so that it's a multiple of 8 bytes.
-	if m.isPerCpu() {
-		numCpus, err := GetNumOfPossibleCpus()
-		if err != nil {
-			return err
-		}
-		m.valueRealSize = ((m.ValueSize + 7) / 8) * 8 * numCpus
-	} else {
-		m.valueRealSize = m.ValueSize
+	if err := m.setValueRealSize(); err != nil {
+		return err
 	}
 
 	// Don't re-create map if it has fd assigned (NewMapFromExisting use case)
